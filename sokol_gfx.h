@@ -1258,6 +1258,7 @@ typedef struct {
 } sg_shader_uniform_desc;
 
 typedef struct {
+    const char* name;
     int size;
     sg_shader_uniform_desc uniforms[SG_MAX_UB_MEMBERS];
 } sg_shader_uniform_block_desc;
@@ -2343,6 +2344,8 @@ typedef struct {
 } _sg_uniform;
 
 typedef struct {
+    GLuint gl_idx;
+    GLuint gl_buf;
     int size;
     int num_uniforms;
     _sg_uniform uniforms[SG_MAX_UB_MEMBERS];
@@ -2519,6 +2522,7 @@ _SOKOL_PRIVATE void _sg_gl_reset_state_cache(_sg_state_cache* cache) {
     _SG_GL_CHECK_ERROR();
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
     _SG_GL_CHECK_ERROR();
     for (int i = 0; i < SG_MAX_VERTEX_ATTRIBUTES; i++) {
         _sg_gl_init_attr(&cache->attrs[i].gl_attr);
@@ -3088,27 +3092,44 @@ _SOKOL_PRIVATE void _sg_create_shader(_sg_shader* shd, const sg_shader_desc* des
             }
             _sg_uniform_block* ub = &stage->uniform_blocks[ub_index];
             ub->size = ub_desc->size;
-            SOKOL_ASSERT(ub->num_uniforms == 0);
-            int cur_uniform_offset = 0;
-            for (int u_index = 0; u_index < SG_MAX_UB_MEMBERS; u_index++) {
-                const sg_shader_uniform_desc* u_desc = &ub_desc->uniforms[u_index];
-                if (u_desc->type == SG_UNIFORMTYPE_INVALID) {
-                    break;
+            if (!ub_desc->name) {
+                ub->gl_idx = -1;
+                SOKOL_ASSERT(ub->num_uniforms == 0);
+                int cur_uniform_offset = 0;
+                for (int u_index = 0; u_index < SG_MAX_UB_MEMBERS; u_index++) {
+                    const sg_shader_uniform_desc* u_desc = &ub_desc->uniforms[u_index];
+                    if (u_desc->type == SG_UNIFORMTYPE_INVALID) {
+                        break;
+                    }
+                    _sg_uniform* u = &ub->uniforms[u_index];
+                    u->type = u_desc->type;
+                    u->count = _sg_def(u_desc->array_count, 1);
+                    u->offset = cur_uniform_offset;
+                    cur_uniform_offset += _sg_uniform_size(u->type, u->count);
+                    if (u_desc->name) {
+                        u->gl_loc = glGetUniformLocation(gl_prog, u_desc->name);
+                    }
+                    else {
+                        u->gl_loc = u_index;
+                    }
+                    ub->num_uniforms++;
                 }
-                _sg_uniform* u = &ub->uniforms[u_index];
-                u->type = u_desc->type;
-                u->count = _sg_def(u_desc->array_count, 1);
-                u->offset = cur_uniform_offset;
-                cur_uniform_offset += _sg_uniform_size(u->type, u->count);
-                if (u_desc->name) {
-                    u->gl_loc = glGetUniformLocation(gl_prog, u_desc->name);
-                }
-                else {
-                    u->gl_loc = u_index;
-                }
-                ub->num_uniforms++;
+                SOKOL_ASSERT(ub_desc->size == cur_uniform_offset);
             }
-            SOKOL_ASSERT(ub_desc->size == cur_uniform_offset);
+            #if !defined(SOKOL_GLES2)
+            else {
+                GLuint gl_idx = glGetUniformBlockIndex(gl_prog, ub_desc->name);
+                SOKOL_ASSERT(gl_idx != GL_INVALID_INDEX);
+                glUniformBlockBinding(gl_prog, gl_idx, ub_index);
+                ub->gl_idx = gl_idx;
+                GLuint gl_buf;
+                glGenBuffers(1, &gl_buf);
+                glBindBuffer(GL_UNIFORM_BUFFER, gl_buf);
+                glBufferData(GL_UNIFORM_BUFFER, ub->size, NULL, GL_DYNAMIC_DRAW);
+                glBindBufferBase(GL_UNIFORM_BUFFER, ub_index, gl_buf);
+                ub->gl_buf = gl_buf;
+            }
+            #endif
             stage->num_uniform_blocks++;
         }
     }
@@ -3917,36 +3938,44 @@ _SOKOL_PRIVATE void _sg_apply_uniform_block(sg_shader_stage stage_index, int ub_
     SOKOL_ASSERT(ub_index < stage->num_uniform_blocks);
     _sg_uniform_block* ub = &stage->uniform_blocks[ub_index];
     SOKOL_ASSERT(ub->size == num_bytes);
-    for (int u_index = 0; u_index < ub->num_uniforms; u_index++) {
-        _sg_uniform* u = &ub->uniforms[u_index];
-        SOKOL_ASSERT(u->type != SG_UNIFORMTYPE_INVALID);
-        if (u->gl_loc == -1) {
-            continue;
-        }
-        GLfloat* ptr = (GLfloat*) (((uint8_t*)data) + u->offset);
-        switch (u->type) {
-            case SG_UNIFORMTYPE_INVALID:
-                break;
-            case SG_UNIFORMTYPE_FLOAT:
-                glUniform1fv(u->gl_loc, u->count, ptr);
-                break;
-            case SG_UNIFORMTYPE_FLOAT2:
-                glUniform2fv(u->gl_loc, u->count, ptr);
-                break;
-            case SG_UNIFORMTYPE_FLOAT3:
-                glUniform3fv(u->gl_loc, u->count, ptr);
-                break;
-            case SG_UNIFORMTYPE_FLOAT4:
-                glUniform4fv(u->gl_loc, u->count, ptr);
-                break;
-            case SG_UNIFORMTYPE_MAT4:
-                glUniformMatrix4fv(u->gl_loc, u->count, GL_FALSE, ptr);
-                break;
-            default:
-                SOKOL_UNREACHABLE;
-                break;
+    if (ub->gl_idx == -1) {
+        for (int u_index = 0; u_index < ub->num_uniforms; u_index++) {
+            _sg_uniform* u = &ub->uniforms[u_index];
+            SOKOL_ASSERT(u->type != SG_UNIFORMTYPE_INVALID);
+            if (u->gl_loc == -1) {
+                continue;
+            }
+            GLfloat* ptr = (GLfloat*) (((uint8_t*)data) + u->offset);
+            switch (u->type) {
+                case SG_UNIFORMTYPE_INVALID:
+                    break;
+                case SG_UNIFORMTYPE_FLOAT:
+                    glUniform1fv(u->gl_loc, u->count, ptr);
+                    break;
+                case SG_UNIFORMTYPE_FLOAT2:
+                    glUniform2fv(u->gl_loc, u->count, ptr);
+                    break;
+                case SG_UNIFORMTYPE_FLOAT3:
+                    glUniform3fv(u->gl_loc, u->count, ptr);
+                    break;
+                case SG_UNIFORMTYPE_FLOAT4:
+                    glUniform4fv(u->gl_loc, u->count, ptr);
+                    break;
+                case SG_UNIFORMTYPE_MAT4:
+                    glUniformMatrix4fv(u->gl_loc, u->count, GL_FALSE, ptr);
+                    break;
+                default:
+                    SOKOL_UNREACHABLE;
+                    break;
+            }
         }
     }
+    #if !defined(SOKOL_GLES2)
+    else {
+        glBindBuffer(GL_UNIFORM_BUFFER, ub->gl_buf);
+        glBufferSubData(GL_UNIFORM_BUFFER, 0, num_bytes, data);
+    }
+    #endif
 }
 
 _SOKOL_PRIVATE void _sg_draw(int base_element, int num_elements, int num_instances) {
