@@ -37,7 +37,7 @@
 extern "C" {
 #endif
 
-SOKOL_DYN_API_DECL void sdyn_load_functions(const char* library_name);
+SOKOL_DYN_API_DECL void sdyn_load(const char* library_name);
 
 #ifdef __cplusplus
 } // extern "C"
@@ -234,7 +234,7 @@ static void _sdyn_fail(const char* msg) {
 
 #include <windows.h>
 
-SOKOL_API_IMPL void sdyn_load_functions(const char* library_name) {
+SOKOL_API_IMPL void sdyn_load(const char* library_name) {
     HMODULE dll = LoadLibraryA(library_name);
     if (!dll) {
         _sdyn_fail("Failed to load library\n");
