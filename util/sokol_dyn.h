@@ -3,7 +3,88 @@
 #endif
 #ifndef SOKOL_DYN_INCLUDED
 /*
-    sokol_dyn.h -- TODO
+    sokol_dyn.h -- dynamic library loader for sokol libraries
+
+    Project URL: https://github.com/floooh/sokol
+
+    Do this:
+        #define SOKOL_IMPL or
+        #define SOKOL_DYN_IMPL
+    before you include this file in *one* C or C++ file to create the
+    implementation.
+
+    FEATURE OVERVIEW
+    ================
+    sokol_dyn.h is a "drop-in" solution to allow dynamic loading of runtime
+    libraries which implement sokol_app, sokol_gfx and sokol_glue functions.
+
+    STEP BY STEP
+    ============
+    --- Compile sokol_app, sokol_gfx (and optionally, sokol_glue) as a shared
+        library, using the backend of your choice:
+
+            #define SOKOL_IMPL
+            #define SOKOL_DLL
+            #define SOKOL_NO_ENTRY
+
+            #define SOKOL_D3D11
+
+            #include <sokol_app.h>
+            #include <sokol_gfx.h>
+            #include <sokol_glue.h>
+
+    --- In your application, implement sokol_dyn AFTER including headers for
+        those libraries compiled above:
+
+            #define SOKOL_NO_ENTRY
+
+            #include <sokol_app.h>
+            #include <sokol_gfx.h>
+            #include <sokol_glue.h>
+
+            #define SOKOL_IMPL
+            #include <util/sokol_dyn.h>
+
+        DO NOT define SOKOL_DLL here. sokol_dyn implements statically linked
+        wrappers which call their respective DLL counterparts through function
+        pointers obtained at load time.
+
+    --- As a last step, call sdyn_load() with the path/name of your shared
+        library, before calling any sokol_app or sokol_gfx functions.
+
+            sdyn_load("sokol-dll");
+
+            sapp_desc desc = {
+                // ...
+            };
+
+            sapp_run(&desc);
+
+
+    LICENSE
+    =======
+    zlib/libpng license
+
+    Copyright (c) 2018 Andre Weissflog
+
+    This software is provided 'as-is', without any express or implied warranty.
+    In no event will the authors be held liable for any damages arising from the
+    use of this software.
+
+    Permission is granted to anyone to use this software for any purpose,
+    including commercial applications, and to alter it and redistribute it
+    freely, subject to the following restrictions:
+
+        1. The origin of this software must not be misrepresented; you must not
+        claim that you wrote the original software. If you use this software in a
+        product, an acknowledgment in the product documentation would be
+        appreciated but is not required.
+
+        2. Altered source versions must be plainly marked as such, and must not
+        be misrepresented as being the original software.
+
+        3. This notice may not be removed or altered from any source
+        distribution.
 */
 #define SOKOL_DYN_INCLUDED
 
