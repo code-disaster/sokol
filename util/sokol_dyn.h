@@ -48,17 +48,51 @@ SOKOL_DYN_API_DECL void sdyn_load(const char* library_name);
 #ifdef SOKOL_DYN_IMPL
 #define SOKOL_DYN_IMPL_INCLUDED (1)
 
+#if defined(_WIN32)
+    #define _SDYN_WIN32 (1)
+#else
+#error "sokol_dyn.h: Unknown platform"
+#endif
+
 #ifndef SOKOL_API_IMPL
     #define SOKOL_API_IMPL
+#endif
+#ifndef SOKOL_DEBUG
+    #ifndef NDEBUG
+        #define SOKOL_DEBUG (1)
+    #endif
 #endif
 #ifndef SOKOL_ASSERT
     #include <assert.h>
     #define SOKOL_ASSERT(c) assert(c)
 #endif
+#ifndef SOKOL_LOG
+    #ifdef SOKOL_DEBUG
+        #include <stdio.h>
+        #define SOKOL_LOG(s) { SOKOL_ASSERT(s); puts(s); }
+    #else
+        #define SOKOL_LOG(s)
+    #endif
+#endif
 #ifndef SOKOL_ABORT
     #include <stdlib.h>
     #define SOKOL_ABORT() abort()
 #endif
+
+/*== PLATFORM SPECIFIC INCLUDES AND DEFINES ==================================*/
+#if defined(_SDYN_WIN32)
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifdef _MSC_VER
+        #pragma warning(push)
+        #pragma warning(disable: 4098)   /* void function returning a value */
+    #endif
+    #include <windows.h>
+    #include <shellapi.h>
+#endif
+
+/*== COMMON DECLARATIONS =====================================================*/
 
 #define _SDYN_APP_FUNCS \
     _SDYN_XMACRO(sapp_isvalid, bool, (void), ()); \
@@ -201,11 +235,6 @@ SOKOL_DYN_API_DECL void sdyn_load(const char* library_name);
 #define _SDYN_GLUE_FUNCS
 #endif
 
-#if defined(_WIN32)
-#pragma warning(push)
-#pragma warning(disable: 4098)
-#endif
-
 #define _SDYN_XMACRO(name, ret, params, args) \
     typedef ret (__stdcall * PFN_ ## name) params; \
     static PFN_ ## name pfn_ ## name; \
@@ -217,22 +246,19 @@ _SDYN_GLUE_FUNCS
 
 #undef _SDYN_XMACRO
 
-#if defined(_WIN32)
-#pragma warning(pop)
+#ifdef _MSC_VER
+    #pragma warning(pop)
 #endif
 
-#if !defined(_WIN32)
-#error "Only implemented for WIN32 at the moment"
-#endif
+/*=== PRIVATE HELPER FUNCTIONS ===============================================*/
 
 static void _sdyn_fail(const char* msg) {
     SOKOL_ASSERT(msg);
     SOKOL_ABORT();
 }
 
-#if defined(_WIN32)
-
-#include <windows.h>
+/*== WINDOWS DESKTOP =========================================================*/
+#if defined(_SDYN_WIN32)
 
 SOKOL_API_IMPL void sdyn_load(const char* library_name) {
     HMODULE dll = LoadLibraryA(library_name);
@@ -251,6 +277,6 @@ SOKOL_API_IMPL void sdyn_load(const char* library_name) {
 #undef _SDYN_XMACRO
 }
 
-#endif // _WIN32
+#endif // _SDYN_WIN32
 
 #endif // SOKOL_DYN_IMPL
