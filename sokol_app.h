@@ -1590,6 +1590,12 @@ inline void sapp_run(const sapp_desc& desc) { return sapp_run(&desc); }
     #if defined(SOKOL_NO_ENTRY)
     #error("sokol_app.h: SOKOL_NO_ENTRY is not supported on Android")
     #endif
+#elif defined(SOKOL_APP_RASPBERRYPI)
+    /* Raspberry Pi */
+    #define _SAPP_RPI (1)
+    #if !defined(SOKOL_GLES3)
+    #error("sokol_app.h: unknown 3D API selected for Raspberry Pi, must be SOKOL_GLES3")
+    #endif
 #elif defined(__linux__) || defined(__unix__)
     /* Linux */
     #define _SAPP_LINUX (1)
@@ -1766,6 +1772,29 @@ inline void sapp_run(const sapp_desc& desc) { return sapp_run(&desc); }
     #include <android/native_activity.h>
     #include <android/looper.h>
     #include <EGL/egl.h>
+    #if defined(SOKOL_GLES3)
+        #include <GLES3/gl3.h>
+    #else
+        #ifndef GL_EXT_PROTOTYPES
+            #define GL_GLEXT_PROTOTYPES
+        #endif
+        #include <GLES2/gl2.h>
+        #include <GLES2/gl2ext.h>
+    #endif
+#elif defined(_SAPP_RPI)
+    #include <gbm.h>
+    #include <xf86drm.h>
+    #include <xf86drmMode.h>
+    #include <poll.h>
+    #include <fcntl.h>
+    #include <errno.h>
+    #include <unistd.h>
+    //#include <linux/input.h>
+    //#include <dirent.h>
+    #include <signal.h>
+    #include <EGL/egl.h>
+    #include <EGL/eglext.h>
+    #include <GLES3/gl3.h>
 #elif defined(_SAPP_LINUX)
     #define GL_GLEXT_PROTOTYPES
     #include <X11/Xlib.h>
@@ -2063,6 +2092,29 @@ typedef struct {
 
 #endif // _SAPP_ANDROID
 
+/*== RASPBERRY PI DECLARATIONS ===============================================*/
+
+#if defined(_SAPP_RPI)
+
+typedef struct {
+    int fd;
+    gbm_device* device;
+    gbm_surface* surface;
+    gbm_bo* last_bo;
+    uint32_t connector_id;
+    drmModeCrtc* crtc;
+    int waiting_for_flip;
+} _sapp_rpi_drm_t;
+
+typedef struct {
+    _sapp_rpi_drm_t drm;
+    EGLDisplay display;
+    EGLContext context;
+    EGLSurface surface;
+} _sapp_rpi_t;
+
+#endif // _SAPP_RPI
+
 /*== LINUX DECLARATIONS ======================================================*/
 #if defined(_SAPP_LINUX)
 
@@ -2295,6 +2347,8 @@ typedef struct {
         #endif
     #elif defined(_SAPP_ANDROID)
         _sapp_android_t android;
+    #elif defined(_SAPP_RPI)
+        _sapp_rpi_t rpi;
     #elif defined(_SAPP_LINUX)
         _sapp_x11_t x11;
         _sapp_glx_t glx;
@@ -8347,6 +8401,345 @@ void ANativeActivity_onCreate(ANativeActivity* activity, void* saved_state, size
 
 #endif /* _SAPP_ANDROID */
 
+/*== RASPBERRY PI ============================================================*/
+
+#if defined(_SAPP_RPI)
+
+_SOKOL_PRIVATE void _sapp_rpi_app_event(sapp_event_type type) {
+    if (_sapp_events_enabled()) {
+        _sapp_init_event(type);
+        _sapp_call_event(&_sapp.event);
+    }
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_init_drm(void) {
+    _sapp_rpi_drm_t* drm = &_sapp.rpi.drm;
+
+    drmModeRes* resources = NULL;
+    for (uint32_t i = 0; i < 32; i++) {
+        char path[32];
+        sprintf(path, "/dev/dri/card%u", i);
+        drm->fd = open(path, O_RDWR | O_CLOEXEC);
+        if (drm->fd < 0) {
+            if (i == 0) {
+                SOKOL_ASSERT(errno != ENOENT && "DRI device not found, have you enabled vc4 driver in /boot/config.txt file?");
+            } else {
+                if (errno == ENOENT) {
+                    break;
+                }
+            }
+            SOKOL_ASSERT(errno != EACCES && "no permission to open DRI device, is your user in 'video' group?");
+        }
+        resources = drmModeGetResources(drm->fd);
+        if (resources != NULL) {
+            break;
+        }
+    }
+    SOKOL_ASSERT(drm->fd > 0 && "cannot open DRI device");
+    SOKOL_ASSERT(resources && "cannot get device resources");
+
+    drmModeConnector* connector = NULL;
+    for (uint32_t i = 0; i < resources->count_connectors; i++) {
+        connector = drmModeGetConnector(drm->fd, resources->connectors[i]);
+        if (connector) {
+            if (connector->connection == DRM_MODE_CONNECTED && connector->count_modes > 0) {
+                drm->connector_id = connector->connector_id;
+                break;
+            }
+            drmModeFreeConnector(connector);
+            connector = NULL;
+        }
+    }
+    SOKOL_ASSERT(connector && "no display is connected");
+
+    drmModeEncoder* encoder = NULL;
+    for (uint32_t i = 0; i < resources->count_encoders; i++) {
+        encoder = drmModeGetEncoder(drm->fd, resources->encoders[i]);
+        if (encoder) {
+            if (encoder->encoder_id == connector->encoder_id) {
+                break;
+            }
+            drmModeFreeEncoder(encoder);
+            encoder = NULL;
+        }
+    }
+    SOKOL_ASSERT(encoder && "cannot find mode encoder");
+
+    drm->crtc = drmModeGetCrtc(drm->fd, encoder->crtc_id);
+    SOKOL_ASSERT(drm->crtc && "cannot get current CRTC");
+
+    _sapp.window_width = drm->crtc->width;
+    _sapp.window_height = drm->crtc->height;
+    _sapp.framebuffer_width = drm->crtc->width;
+    _sapp.framebuffer_height = drm->crtc->height;
+    // drm->crtc->mode.vrefresh
+
+    drmModeFreeEncoder(encoder);
+    drmModeFreeConnector(connector);
+    drmModeFreeResources(resources);
+
+    drm->device = gbm_create_device(drm->fd);
+    SOKOL_ASSERT(drm->device && "cannot create GBM device");
+
+    uint32_t surface_format = GBM_FORMAT_XRGB8888;
+    uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
+    int supported = gbm_device_is_format_supported(drm->device, surface_format, surface_flags);
+    SOKOL_ASSERT(supported && "XRGB888 format is not supported for output rendering");
+
+    uint32_t width = drm->crtc->mode.hdisplay;
+    uint32_t height = drm->crtc->mode.vdisplay;
+
+    drm->surface = gbm_surface_create(drm->device, width, height, surface_format, surface_flags);
+    SOKOL_ASSERT(drm->surface && "cannot create GBM output surface");
+
+    drm->waiting_for_flip = 0;
+    drm->last_bo = NULL;
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_cleanup_drm(void) {
+    _sapp_rpi_drm_t* drm = &_sapp.rpi.drm;
+
+    drmModeSetCrtc(drm->fd, drm->crtc->crtc_id, drm->crtc->buffer_id, drm->crtc->x, drm->crtc->y, &drm->connector_id, 1, &drm->crtc->mode);
+    drmModeFreeCrtc(drm->crtc);
+
+    if (drm->last_bo) {
+        gbm_surface_release_buffer(drm->surface, drm->last_bo);
+    }
+
+    gbm_surface_destroy(drm->surface);
+    gbm_device_destroy(drm->device);
+    close(drm->fd);
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_init_egl(void) {
+    PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT = (PFNEGLGETPLATFORMDISPLAYEXTPROC) eglGetProcAddress("eglGetPlatformDisplayEXT");
+    PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC eglCreatePlatformWindowSurfaceEXT = (PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC) eglGetProcAddress("eglCreatePlatformWindowSurfaceEXT");
+
+    _sapp.rpi.display = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_MESA, _sapp.rpi.drm.device, NULL);
+    SOKOL_ASSERT(_sapp.rpi.display != EGL_NO_DISPLAY && "cannot get EGL display");
+
+    EGLint major, minor;
+    EGLBoolean ok = eglInitialize(_sapp.rpi.display, &major, &minor);
+    SOKOL_ASSERT(ok && "cannot initialize EGL display");
+
+    ok = eglBindAPI(EGL_OPENGL_ES_API);
+    SOKOL_ASSERT(ok && "cannot use OpenGL ES API");
+
+    EGLint alpha_size = _sapp.desc.alpha ? 8 : 0;
+    const EGLint attribs[] = {
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+        //EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER,
+        EGL_RED_SIZE, 8,
+        EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, alpha_size,
+        EGL_DEPTH_SIZE, 24,
+        EGL_STENCIL_SIZE, 0,
+        EGL_NONE,
+    };
+
+    EGLConfig configs[64];
+    EGLint config_count;
+    ok = eglChooseConfig(_sapp.rpi.display, attribs, configs, 64, &config_count);
+    SOKOL_ASSERT(ok && config_count != 0 && "cannot find suitable EGL configs");
+
+    EGLConfig config = NULL;
+    for (EGLint i = 0; i < config_count; i++) {
+        EGLint format;
+        if (eglGetConfigAttrib(_sapp.rpi.display, configs[i], EGL_NATIVE_VISUAL_ID, &format) && format == GBM_FORMAT_XRGB8888) {
+            config = configs[i];
+            break;
+        }
+    }
+    SOKOL_ASSERT(config && "cannot find EGL config that matches GBM surface format");
+
+    _sapp.rpi.surface = eglCreatePlatformWindowSurfaceEXT(_sapp.rpi.display, config, _sapp.rpi.drm.surface, NULL);
+    SOKOL_ASSERT(_sapp.rpi.surface != EGL_NO_SURFACE && "cannot create EGL surface");
+
+    const EGLint context_attrib[] = {
+        #if defined(SOKOL_GLES3)
+            EGL_CONTEXT_CLIENT_VERSION, _sapp.desc.gl_force_gles2 ? 2 : 3,
+        #else
+            EGL_CONTEXT_CLIENT_VERSION, 2,
+        #endif
+
+        // use EGL_KHR_create_context if you want to debug context together with GL_KHR_debug
+        // EGL_CONTEXT_FLAGS_KHR, EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR,
+
+        // use EGL_KHR_create_context_no_error for "production" builds, may improve performance
+        // EGL_CONTEXT_OPENGL_NO_ERROR_KHR, EGL_TRUE,
+
+        EGL_NONE,
+    };
+    _sapp.rpi.context = eglCreateContext(_sapp.rpi.display, config, EGL_NO_CONTEXT, context_attrib);
+    SOKOL_ASSERT(_sapp.rpi.context != EGL_NO_CONTEXT && "cannot create EGL context");
+
+    ok = eglMakeCurrent(_sapp.rpi.display, _sapp.rpi.surface, _sapp.rpi.surface, _sapp.rpi.context);
+    SOKOL_ASSERT(ok && "cannot set EGL context");
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_cleanup_egl(void) {
+    if (_sapp.rpi.display != EGL_NO_DISPLAY) {
+        eglMakeCurrent(_sapp.rpi.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (_sapp.rpi.context != EGL_NO_CONTEXT) {
+            eglDestroyContext(_sapp.rpi.display, _sapp.rpi.context);
+        }
+        if (_sapp.rpi.surface != EGL_NO_SURFACE) {
+            eglDestroySurface(_sapp.rpi.display, _sapp.rpi.surface);
+        }
+        eglTerminate(_sapp.rpi.display);
+    }
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_destroy_bo(gbm_bo* bo, void* user) {
+    int dri = gbm_device_get_fd(gbm_bo_get_device(bo));
+    uint32_t fb = (uint32_t)(uintptr_t) user;
+    drmModeRmFB(dri, fb);
+}
+
+_SOKOL_PRIVATE uint32_t _sapp_rpi_get_fb_from_bo(_sapp_rpi_drm_t* drm, gbm_bo* bo) {
+    uint32_t fb = (uint32_t)(uintptr_t) gbm_bo_get_user_data(bo);
+    if (fb) {
+        return fb;
+    }
+
+    uint32_t width = gbm_bo_get_width(bo);
+    uint32_t height = gbm_bo_get_height(bo);
+    uint32_t stride = gbm_bo_get_stride(bo);
+    uint32_t fd = gbm_bo_get_handle(bo).u32;
+
+    int ok = drmModeAddFB(drm->fd, width, height, 24, 32, stride, fd, &fb);
+    SOKOL_ASSERT(ok == 0 && "cannot add DRM framebuffer");
+
+    ok = drmModeSetCrtc(drm->fd, drm->crtc->crtc_id, fb, 0, 0, &drm->connector_id, 1, &drm->crtc->mode);
+    SOKOL_ASSERT(ok == 0 && "cannot set CRTC for DRM framebuffer");
+
+    gbm_bo_set_user_data(bo, (void*)(uintptr_t) fb, _sapp_rpi_destroy_bo);
+    return fb;
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_page_flipped_handler(int fd, unsigned int sequence, unsigned int sec, unsigned int usec, void* user)
+{
+    _SOKOL_UNUSED(fd);
+    _SOKOL_UNUSED(sequence);
+    _SOKOL_UNUSED(sec);
+    _SOKOL_UNUSED(usec);
+    int* waiting_for_flip = (int*) user;
+    *waiting_for_flip = 0;
+}
+
+_SOKOL_PRIVATE int _sapp_rpi_wait_for_flip(_sapp_rpi_drm_t* drm, int timeout)
+{
+    drmEventContext ctx = {
+        .version = DRM_EVENT_CONTEXT_VERSION,
+        .page_flip_handler = _sapp_rpi_page_flipped_handler,
+    };
+
+    while (drm->waiting_for_flip) {
+        struct pollfd p = {
+            .fd = drm->fd,
+            .events = POLLIN,
+        };
+        if (poll(&p, 1, timeout) < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            SOKOL_ASSERT(!"poll error");
+            return 0;
+        }
+
+        if (p.revents & POLLIN) {
+            drmHandleEvent(drm->fd, &ctx);
+        } else {
+            // timeout reached
+            return 0;
+        }
+    }
+    return 1;
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_present(void) {
+    _sapp_rpi_drm_t* drm = &_sapp.rpi.drm;
+    _sapp_rpi_t* egl = &_sapp.rpi;
+
+    int timeout = _sapp.swap_interval > 0 ? -1 : 0;
+    if (_sapp_rpi_wait_for_flip(drm, timeout) == 0) {
+        // frame is done faster than previous has finished flipping
+        // so don't display it and continue with next frame
+        return;
+    }
+
+    if (drm->last_bo) {
+        gbm_surface_release_buffer(drm->surface, drm->last_bo);
+    }
+
+    EGLBoolean ok = eglSwapBuffers(egl->display, egl->surface);
+    SOKOL_ASSERT(ok && "cannot swap EGL buffers");
+
+    gbm_bo* bo = gbm_surface_lock_front_buffer(drm->surface);
+    SOKOL_ASSERT(bo && "cannot lock GBM surface");
+    drm->last_bo = bo;
+
+    uint32_t fb = _sapp_rpi_get_fb_from_bo(drm, bo);
+    if (drmModePageFlip(drm->fd, drm->crtc->crtc_id, fb, DRM_MODE_PAGE_FLIP_EVENT, &drm->waiting_for_flip) == 0) {
+        drm->waiting_for_flip = 1;
+    }
+}
+
+_SOKOL_PRIVATE void _sapp_on_sigint(int num) {
+    _SOKOL_UNUSED(num);
+    _sapp.quit_requested = true;
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_run(const sapp_desc* desc) {
+    _sapp_init_state(desc);
+
+    _sapp_rpi_init_drm();
+    _sapp_rpi_init_egl();
+
+    // dpi scale
+
+    _sapp.valid = true;
+    _sapp.desc.fullscreen = true;
+
+    // swap interval
+
+    signal(SIGINT, _sapp_on_sigint);
+
+    while (!_sapp.quit_ordered) {
+        eglMakeCurrent(_sapp.rpi.display, _sapp.rpi.surface, _sapp.rpi.surface, _sapp.rpi.context);
+        // input events
+        _sapp_frame();
+        eglSwapBuffers(_sapp.rpi.display, _sapp.rpi.surface);
+        _sapp_rpi_present();
+        /* handle quit-requested, either from window or from sapp_request_quit() */
+        if (_sapp.quit_requested && !_sapp.quit_ordered) {
+            /* give user code a chance to intervene */
+            _sapp_rpi_app_event(SAPP_EVENTTYPE_QUIT_REQUESTED);
+            /* if user code hasn't intervened, quit the app */
+            if (_sapp.quit_requested) {
+                _sapp.quit_ordered = true;
+            }
+        }
+    }
+    _sapp_call_cleanup();
+
+    _sapp_rpi_cleanup_egl();
+    _sapp_rpi_cleanup_drm();
+
+    _sapp_discard_state();
+}
+
+#if !defined(SOKOL_NO_ENTRY)
+int main(int argc, char* argv[]) {
+    sapp_desc desc = sokol_main(argc, argv);
+    _sapp_rpi_run(&desc);
+    return 0;
+}
+#endif /* SOKOL_NO_ENTRY */
+#endif /* _SAPP_RPI */
+
 /*== LINUX ==================================================================*/
 #if defined(_SAPP_LINUX)
 
@@ -10548,6 +10941,8 @@ SOKOL_API_IMPL void sapp_run(const sapp_desc* desc) {
         _sapp_win32_run(desc);
     #elif defined(_SAPP_UWP)
         _sapp_uwp_run(desc);
+    #elif defined(_SAPP_RPI)
+        _sapp_rpi_run(desc);
     #elif defined(_SAPP_LINUX)
         _sapp_linux_run(desc);
     #else
