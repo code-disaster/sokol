@@ -1789,8 +1789,8 @@ inline void sapp_run(const sapp_desc& desc) { return sapp_run(&desc); }
     #include <fcntl.h>
     #include <errno.h>
     #include <unistd.h>
-    //#include <linux/input.h>
-    //#include <dirent.h>
+    #include <linux/input.h>
+    #include <dirent.h>
     #include <signal.h>
     #include <EGL/egl.h>
     #include <EGL/eglext.h>
@@ -2100,7 +2100,8 @@ typedef struct {
     int fd;
     gbm_device* device;
     gbm_surface* surface;
-    gbm_bo* last_bo;
+    gbm_bo* curr_bo;
+    gbm_bo* next_bo;
     uint32_t connector_id;
     drmModeCrtc* crtc;
     int waiting_for_flip;
@@ -2111,6 +2112,10 @@ typedef struct {
     EGLDisplay display;
     EGLContext context;
     EGLSurface surface;
+    int fd_kb;
+    int fd_mouse;
+    char char_table[SAPP_MAX_KEYCODES];
+    char char_table_shift[SAPP_MAX_KEYCODES];
 } _sapp_rpi_t;
 
 #endif // _SAPP_RPI
@@ -8405,6 +8410,218 @@ void ANativeActivity_onCreate(ANativeActivity* activity, void* saved_state, size
 
 #if defined(_SAPP_RPI)
 
+_SOKOL_PRIVATE bool _sapp_rpi_init_input_devices(void) {
+    _sapp.rpi.fd_kb = -1;
+    _sapp.rpi.fd_mouse = -1;
+
+    const char* inputs_dir = "/dev/input/by-id";
+    char dev_filepath[256];
+
+    DIR* dirp = opendir(inputs_dir);
+    if (dirp) {
+        struct dirent* de;
+        while ((de = readdir(dirp)) != NULL) {
+            if (_sapp.rpi.fd_kb == -1 && strstr(de->d_name, "-event-kbd")) {
+                snprintf(dev_filepath, sizeof(dev_filepath), "%s/%s", inputs_dir, de->d_name);
+                _sapp.rpi.fd_kb = open(dev_filepath, O_RDONLY | O_NONBLOCK);
+                if (_sapp.rpi.fd_kb != -1) {
+                    ioctl(_sapp.rpi.fd_kb, EVIOCGRAB, 1);
+                }
+            }
+            else if (_sapp.rpi.fd_mouse == -1 && strstr(de->d_name, "-event-mouse")) {
+                snprintf(dev_filepath, sizeof(dev_filepath), "%s/%s", inputs_dir, de->d_name);
+                _sapp.rpi.fd_mouse = open(dev_filepath, O_RDONLY | O_NONBLOCK);
+                if (_sapp.rpi.fd_mouse != -1) {
+                    ioctl(_sapp.rpi.fd_mouse, EVIOCGRAB, 1);
+                }
+            }
+        }
+        closedir(dirp);
+
+        if (_sapp.rpi.fd_kb == -1 && _sapp.rpi.fd_mouse == -1) {
+            SOKOL_LOG("no input devices found");
+        }
+
+        return true;
+    } else {
+        SOKOL_LOG("failed to open directory: /dev/input/by-id");
+        return false;
+    }
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_cleanup_input_devices(void) {
+    if (_sapp.rpi.fd_kb) {
+        close(_sapp.rpi.fd_kb);
+        _sapp.rpi.fd_kb = -1;
+    }
+    if (_sapp.rpi.fd_mouse) {
+        close(_sapp.rpi.fd_mouse);
+        _sapp.rpi.fd_mouse = -1;
+    }
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_process_kb_event(const struct input_event* e, uint32_t* mods) {
+    SOKOL_ASSERT(e->type == EV_KEY);
+    _sapp_rpi_t* state = &_sapp.rpi;
+
+    if (e->code >= SAPP_MAX_KEYCODES) {
+        return;
+    }
+
+    sapp_keycode keycode = _sapp_translate_key(e->code);
+
+    /* key is pressed */
+    if (e->value != 0) {
+        /* modifier keys */
+        if (keycode == SAPP_KEYCODE_LEFT_SHIFT || keycode == SAPP_KEYCODE_RIGHT_SHIFT) {
+            *mods = (*mods) | SAPP_MODIFIER_SHIFT;
+        }
+
+        if (keycode == SAPP_KEYCODE_LEFT_ALT || keycode == SAPP_KEYCODE_RIGHT_ALT) {
+            *mods = (*mods) | SAPP_MODIFIER_ALT;
+        }
+
+        if (keycode == SAPP_KEYCODE_LEFT_CONTROL || keycode == SAPP_KEYCODE_RIGHT_CONTROL) {
+            (*mods) = (*mods) | SAPP_MODIFIER_CTRL;
+        }
+
+        if (keycode == SAPP_KEYCODE_LEFT_SUPER || keycode == SAPP_KEYCODE_RIGHT_SUPER) {
+            (*mods) = (*mods) | SAPP_MODIFIER_SUPER;
+        }
+
+        if (_sapp_events_enabled()) {
+            /* key_down event */
+            _sapp_init_event(SAPP_EVENTTYPE_KEY_DOWN);
+            _sapp.event.modifiers = *mods;
+            _sapp.event.key_code = keycode;
+            _sapp.event.key_repeat = (e->value == 2);
+            _sapp_call_event(&_sapp.event);
+
+            /* char event */
+            char c = (*mods & SAPP_MODIFIER_SHIFT) ? state->char_table_shift[e->code] : state->char_table[e->code];
+            if (c >= 32) {
+                _sapp_init_event(SAPP_EVENTTYPE_CHAR);
+                _sapp.event.modifiers = *mods;
+                _sapp.event.char_code = c;
+                _sapp.event.key_repeat = (e->value == 2);
+                _sapp_call_event(&_sapp.event);
+            }
+        }
+    }
+    else if (_sapp_events_enabled()) {
+        _sapp_init_event(SAPP_EVENTTYPE_KEY_UP);
+        _sapp.event.modifiers = *mods;
+        _sapp.event.key_code = keycode;
+        _sapp_call_event(&_sapp.event);
+    }
+}
+
+_SOKOL_PRIVATE uint32_t _sapp_rpi_mod(int rpi_mods) {
+    /* TODO */
+    return 0;
+}
+
+_SOKOL_PRIVATE sapp_mousebutton _sapp_rpi_translate_button(const input_event* event) {
+    switch (event->code) {
+        case BTN_LEFT:   return SAPP_MOUSEBUTTON_LEFT;
+        case BTN_RIGHT:  return SAPP_MOUSEBUTTON_RIGHT;
+        case BTN_MIDDLE: return SAPP_MOUSEBUTTON_MIDDLE;
+        default:         return SAPP_MOUSEBUTTON_INVALID;
+    }
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_mouse_event(sapp_event_type type, sapp_mousebutton btn, uint32_t mods) {
+    if (_sapp_events_enabled()) {
+        _sapp_init_event(type);
+        _sapp.event.mouse_button = btn;
+        _sapp.event.modifiers = mods;
+        _sapp_call_event(&_sapp.event);
+    }
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_process_mouse_event(const struct input_event* e, uint32_t mods) {
+    _sapp_rpi_t* state = &_sapp.rpi;
+
+    if (e->type == EV_KEY) {
+        if (e->value == 1) {
+            const sapp_mousebutton btn = _sapp_rpi_translate_button(e);
+            if (btn != SAPP_MOUSEBUTTON_INVALID) {
+                _sapp_rpi_mouse_event(SAPP_EVENTTYPE_MOUSE_DOWN, btn, mods);
+            }
+        } else if (e->value == 0) {
+            const sapp_mousebutton btn = _sapp_rpi_translate_button(e);
+            if (btn != SAPP_MOUSEBUTTON_INVALID) {
+                _sapp_rpi_mouse_event(SAPP_EVENTTYPE_MOUSE_UP, btn, mods);
+            }
+        }
+    } else if (e->type == EV_REL) {
+        if (e->code < 2) {
+            if (!_sapp.mouse.locked) {
+                if (e->code == 0) {
+                    _sapp.mouse.dx = (float) e->value;
+                    _sapp.mouse.x += _sapp.mouse.dx;
+                    if (_sapp.mouse.x < 0.0f) {
+                        _sapp.mouse.x = 0.0f;
+                    } else if (_sapp.mouse.x >= _sapp.window_width) {
+                        _sapp.mouse.x = _sapp.window_width - 1.0f;
+                    }
+                } else if (e->code == 1) {
+                    _sapp.mouse.dy = (float) e->value;
+                    _sapp.mouse.y += _sapp.mouse.dy;
+                    if (_sapp.mouse.y < 0.0f) {
+                        _sapp.mouse.y = 0.0f;
+                    } else if (_sapp.mouse.y >= _sapp.window_height) {
+                        _sapp.mouse.y = _sapp.window_height - 1.0f;
+                    }
+                }
+                _sapp.mouse.pos_valid = true;
+                //printf("mouse: x=%.2f / y=%.2f\n", _sapp.mouse.x, _sapp.mouse.y);
+                _sapp_rpi_mouse_event(SAPP_EVENTTYPE_MOUSE_MOVE, SAPP_MOUSEBUTTON_INVALID, _sapp_rpi_mod(0));
+            }
+        } else if (e->code == 8 && _sapp_events_enabled()) {
+            /* scroll */
+            _sapp_init_event(SAPP_EVENTTYPE_MOUSE_SCROLL);
+            _sapp.event.modifiers = mods;
+            _sapp.event.scroll_y = (float)e->value; /* value is +1 or -1 */
+            _sapp_call_event(&_sapp.event);
+        }
+    }
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_read_input_devices(void) {
+    _sapp_rpi_t* state = &_sapp.rpi;
+
+    const int max_events = 64;
+    struct input_event events[max_events];
+    uint32_t mods = 0;
+
+    if (state->fd_kb != -1) {
+        int read_bytes;
+        while ((read_bytes = read(state->fd_kb, events, sizeof(events))) > 0) {
+            const int num_events = read_bytes / sizeof(struct input_event);
+            for (int i = 0; i < num_events; i++) {
+                const struct input_event* e = &events[i];
+                if (e->type == EV_KEY) {
+                    _sapp_rpi_process_kb_event(e, &mods);
+                }
+            }
+        } /* if read_bytes > 0 */
+    }
+
+    if (state->fd_mouse != -1) {
+        int read_bytes;
+        while ((read_bytes = read(state->fd_mouse, events, sizeof(events))) > 0) {
+            const int num_events = read_bytes / sizeof(struct input_event);
+            for (int i = 0; i < num_events; i++) {
+                const struct input_event* e = &events[i];
+                if (e->type == EV_KEY || e->type == EV_REL) {
+                    _sapp_rpi_process_mouse_event(e, mods);
+                }
+            }
+        } /* if read_bytes > 0 */
+    }
+}
+
 _SOKOL_PRIVATE void _sapp_rpi_app_event(sapp_event_type type) {
     if (_sapp_events_enabled()) {
         _sapp_init_event(type);
@@ -8430,10 +8647,20 @@ _SOKOL_PRIVATE void _sapp_rpi_init_drm(void) {
             }
             SOKOL_ASSERT(errno != EACCES && "no permission to open DRI device, is your user in 'video' group?");
         }
+#if 0
+        uint64_t has_dumb = 0;
+        if (drmGetCap(drm->fd, DRM_CAP_DUMB_BUFFER, &has_dumb) < 0 || !has_dumb) {
+            close(drm->fd);
+            drm->fd = 0;
+            continue;
+        }
+#endif
         resources = drmModeGetResources(drm->fd);
         if (resources != NULL) {
             break;
         }
+        close(drm->fd);
+        drm->fd = 0;
     }
     SOKOL_ASSERT(drm->fd > 0 && "cannot open DRI device");
     SOKOL_ASSERT(resources && "cannot get device resources");
@@ -8493,7 +8720,8 @@ _SOKOL_PRIVATE void _sapp_rpi_init_drm(void) {
     SOKOL_ASSERT(drm->surface && "cannot create GBM output surface");
 
     drm->waiting_for_flip = 0;
-    drm->last_bo = NULL;
+    drm->curr_bo = NULL;
+    drm->next_bo = NULL;
 }
 
 _SOKOL_PRIVATE void _sapp_rpi_cleanup_drm(void) {
@@ -8502,8 +8730,14 @@ _SOKOL_PRIVATE void _sapp_rpi_cleanup_drm(void) {
     drmModeSetCrtc(drm->fd, drm->crtc->crtc_id, drm->crtc->buffer_id, drm->crtc->x, drm->crtc->y, &drm->connector_id, 1, &drm->crtc->mode);
     drmModeFreeCrtc(drm->crtc);
 
-    if (drm->last_bo) {
-        gbm_surface_release_buffer(drm->surface, drm->last_bo);
+    if (drm->curr_bo) {
+        gbm_surface_release_buffer(drm->surface, drm->curr_bo);
+        drm->curr_bo = NULL;
+    }
+
+    if (drm->next_bo) {
+        gbm_surface_release_buffer(drm->surface, drm->next_bo);
+        drm->next_bo = NULL;
     }
 
     gbm_surface_destroy(drm->surface);
@@ -8528,8 +8762,8 @@ _SOKOL_PRIVATE void _sapp_rpi_init_egl(void) {
     EGLint alpha_size = _sapp.desc.alpha ? 8 : 0;
     const EGLint attribs[] = {
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        //EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER,
+        //EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+        EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER,
         EGL_RED_SIZE, 8,
         EGL_GREEN_SIZE, 8,
         EGL_BLUE_SIZE, 8,
@@ -8612,9 +8846,6 @@ _SOKOL_PRIVATE uint32_t _sapp_rpi_get_fb_from_bo(_sapp_rpi_drm_t* drm, gbm_bo* b
     int ok = drmModeAddFB(drm->fd, width, height, 24, 32, stride, fd, &fb);
     SOKOL_ASSERT(ok == 0 && "cannot add DRM framebuffer");
 
-    ok = drmModeSetCrtc(drm->fd, drm->crtc->crtc_id, fb, 0, 0, &drm->connector_id, 1, &drm->crtc->mode);
-    SOKOL_ASSERT(ok == 0 && "cannot set CRTC for DRM framebuffer");
-
     gbm_bo_set_user_data(bo, (void*)(uintptr_t) fb, _sapp_rpi_destroy_bo);
     return fb;
 }
@@ -8629,18 +8860,22 @@ _SOKOL_PRIVATE void _sapp_rpi_page_flipped_handler(int fd, unsigned int sequence
     *waiting_for_flip = 0;
 }
 
-_SOKOL_PRIVATE int _sapp_rpi_wait_for_flip(_sapp_rpi_drm_t* drm, int timeout)
-{
+_SOKOL_PRIVATE int _sapp_rpi_wait_for_flip(int timeout) {
+    _sapp_rpi_drm_t* drm = &_sapp.rpi.drm;
+
     drmEventContext ctx = {
         .version = DRM_EVENT_CONTEXT_VERSION,
         .page_flip_handler = _sapp_rpi_page_flipped_handler,
     };
 
+    struct pollfd p = {
+        .fd = drm->fd,
+        .events = POLLIN,
+    };
+
     while (drm->waiting_for_flip) {
-        struct pollfd p = {
-            .fd = drm->fd,
-            .events = POLLIN,
-        };
+        p.revents = 0;
+
         if (poll(&p, 1, timeout) < 0) {
             if (errno == EINTR) {
                 continue;
@@ -8664,60 +8899,63 @@ _SOKOL_PRIVATE void _sapp_rpi_present(void) {
     _sapp_rpi_t* egl = &_sapp.rpi;
 
     int timeout = _sapp.swap_interval > 0 ? -1 : 0;
-    if (_sapp_rpi_wait_for_flip(drm, timeout) == 0) {
+    if (_sapp_rpi_wait_for_flip(timeout) == 0) {
         // frame is done faster than previous has finished flipping
         // so don't display it and continue with next frame
         return;
     }
 
-    if (drm->last_bo) {
-        gbm_surface_release_buffer(drm->surface, drm->last_bo);
+    if (drm->curr_bo) {
+        gbm_surface_release_buffer(drm->surface, drm->curr_bo);
+        drm->curr_bo = NULL;
     }
 
-    EGLBoolean ok = eglSwapBuffers(egl->display, egl->surface);
-    SOKOL_ASSERT(ok && "cannot swap EGL buffers");
+    drm->curr_bo = drm->next_bo;
 
-    gbm_bo* bo = gbm_surface_lock_front_buffer(drm->surface);
-    SOKOL_ASSERT(bo && "cannot lock GBM surface");
-    drm->last_bo = bo;
+    EGLBoolean egl_ok = eglSwapBuffers(egl->display, egl->surface);
+    SOKOL_ASSERT(egl_ok && "cannot swap EGL buffers");
 
-    uint32_t fb = _sapp_rpi_get_fb_from_bo(drm, bo);
-    if (drmModePageFlip(drm->fd, drm->crtc->crtc_id, fb, DRM_MODE_PAGE_FLIP_EVENT, &drm->waiting_for_flip) == 0) {
-        drm->waiting_for_flip = 1;
+    drm->next_bo = gbm_surface_lock_front_buffer(drm->surface);
+    SOKOL_ASSERT(drm->next_bo && "cannot lock GBM surface");
+
+    uint32_t fb = _sapp_rpi_get_fb_from_bo(drm, drm->next_bo);
+
+    if (!drm->curr_bo) {
+        int err = drmModeSetCrtc(drm->fd, drm->crtc->crtc_id, fb, 0, 0, &drm->connector_id, 1, &drm->crtc->mode);
+        SOKOL_ASSERT(err == 0 && "cannot set CRTC for DRM framebuffer");
+    } else {
+        int err = drmModePageFlip(drm->fd, drm->crtc->crtc_id, fb, DRM_MODE_PAGE_FLIP_EVENT, &drm->waiting_for_flip);
+        if (err == 0 && _sapp.swap_interval > 0) {
+            drm->waiting_for_flip = 1;
+        }
     }
-}
-
-_SOKOL_PRIVATE void _sapp_on_sigint(int num) {
-    _SOKOL_UNUSED(num);
-    _sapp.quit_requested = true;
 }
 
 _SOKOL_PRIVATE void _sapp_rpi_run(const sapp_desc* desc) {
     _sapp_init_state(desc);
 
+    _sapp_rpi_init_input_devices();
     _sapp_rpi_init_drm();
     _sapp_rpi_init_egl();
 
-    // dpi scale
+    _sapp.desc.width = _sapp.window_width;
+    _sapp.desc.height = _sapp.window_height;
+    _sapp.desc.fullscreen = true;
+    _sapp.desc.swap_interval = 1;
+    _sapp.desc.high_dpi = false;
+
+    _sapp.fullscreen = true;
+    _sapp.dpi_scale = 1.0f;
+    _sapp.swap_interval = 1;
 
     _sapp.valid = true;
-    _sapp.desc.fullscreen = true;
-
-    // swap interval
-
-    signal(SIGINT, _sapp_on_sigint);
 
     while (!_sapp.quit_ordered) {
-        eglMakeCurrent(_sapp.rpi.display, _sapp.rpi.surface, _sapp.rpi.surface, _sapp.rpi.context);
-        // input events
+        _sapp_rpi_read_input_devices();
         _sapp_frame();
-        eglSwapBuffers(_sapp.rpi.display, _sapp.rpi.surface);
         _sapp_rpi_present();
-        /* handle quit-requested, either from window or from sapp_request_quit() */
         if (_sapp.quit_requested && !_sapp.quit_ordered) {
-            /* give user code a chance to intervene */
             _sapp_rpi_app_event(SAPP_EVENTTYPE_QUIT_REQUESTED);
-            /* if user code hasn't intervened, quit the app */
             if (_sapp.quit_requested) {
                 _sapp.quit_ordered = true;
             }
@@ -8725,8 +8963,11 @@ _SOKOL_PRIVATE void _sapp_rpi_run(const sapp_desc* desc) {
     }
     _sapp_call_cleanup();
 
+    _sapp_rpi_wait_for_flip(-1);
+
     _sapp_rpi_cleanup_egl();
     _sapp_rpi_cleanup_drm();
+    _sapp_rpi_cleanup_input_devices();
 
     _sapp_discard_state();
 }
