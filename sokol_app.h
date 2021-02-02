@@ -2100,6 +2100,7 @@ typedef struct {
     int fd;
     gbm_device* device;
     gbm_surface* surface;
+    gbm_bo* front_bo;
     gbm_bo* curr_bo;
     gbm_bo* next_bo;
     uint32_t connector_id;
@@ -8647,14 +8648,6 @@ _SOKOL_PRIVATE void _sapp_rpi_init_drm(void) {
             }
             SOKOL_ASSERT(errno != EACCES && "no permission to open DRI device, is your user in 'video' group?");
         }
-#if 0
-        uint64_t has_dumb = 0;
-        if (drmGetCap(drm->fd, DRM_CAP_DUMB_BUFFER, &has_dumb) < 0 || !has_dumb) {
-            close(drm->fd);
-            drm->fd = 0;
-            continue;
-        }
-#endif
         resources = drmModeGetResources(drm->fd);
         if (resources != NULL) {
             break;
@@ -8720,6 +8713,7 @@ _SOKOL_PRIVATE void _sapp_rpi_init_drm(void) {
     SOKOL_ASSERT(drm->surface && "cannot create GBM output surface");
 
     drm->waiting_for_flip = 0;
+    drm->front_bo = NULL;
     drm->curr_bo = NULL;
     drm->next_bo = NULL;
 }
@@ -8745,65 +8739,133 @@ _SOKOL_PRIVATE void _sapp_rpi_cleanup_drm(void) {
     close(drm->fd);
 }
 
+_SOKOL_PRIVATE bool _sapp_rpi_supports_extension(const char* extensions, const char* match) {
+    return extensions && strstr(extensions, match);
+}
+
 _SOKOL_PRIVATE void _sapp_rpi_init_egl(void) {
-    PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT = (PFNEGLGETPLATFORMDISPLAYEXTPROC) eglGetProcAddress("eglGetPlatformDisplayEXT");
-    PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC eglCreatePlatformWindowSurfaceEXT = (PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC) eglGetProcAddress("eglCreatePlatformWindowSurfaceEXT");
+    const char* extensions = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+    printf("EGL client extension: %s\n", extensions);
 
-    _sapp.rpi.display = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_MESA, _sapp.rpi.drm.device, NULL);
-    SOKOL_ASSERT(_sapp.rpi.display != EGL_NO_DISPLAY && "cannot get EGL display");
+    if (_sapp_rpi_supports_extension(extensions, "EGL_MESA_platform_gbm")) {
+        PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT =
+            (PFNEGLGETPLATFORMDISPLAYEXTPROC) eglGetProcAddress("eglGetPlatformDisplayEXT");
+        SOKOL_ASSERT(eglGetPlatformDisplayEXT);
+        _sapp.rpi.display = eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_MESA, _sapp.rpi.drm.device, NULL);
+    } else {
+        _sapp.rpi.display = eglGetDisplay(_sapp.rpi.drm.device);
+    }
+    SOKOL_ASSERT(_sapp.rpi.display != EGL_NO_DISPLAY);
 
-    EGLint major, minor;
-    EGLBoolean ok = eglInitialize(_sapp.rpi.display, &major, &minor);
-    SOKOL_ASSERT(ok && "cannot initialize EGL display");
+    EGLint major = 0, minor = 0;
+    if (!eglInitialize(_sapp.rpi.display, &major, &minor)) {
+        SOKOL_ASSERT(!"cannot initialize EGL display");
+    }
+    printf("EGL version: %d.%d\n", major, minor);
 
-    ok = eglBindAPI(EGL_OPENGL_ES_API);
+    EGLint ok = eglBindAPI(EGL_OPENGL_ES_API);
     SOKOL_ASSERT(ok && "cannot use OpenGL ES API");
 
-    EGLint alpha_size = _sapp.desc.alpha ? 8 : 0;
-    const EGLint attribs[] = {
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
-        //EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER,
-        EGL_RED_SIZE, 8,
-        EGL_GREEN_SIZE, 8,
-        EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, alpha_size,
-        EGL_DEPTH_SIZE, 24,
-        EGL_STENCIL_SIZE, 0,
-        EGL_NONE,
-    };
-
-    EGLConfig configs[64];
-    EGLint config_count;
-    ok = eglChooseConfig(_sapp.rpi.display, attribs, configs, 64, &config_count);
-    SOKOL_ASSERT(ok && config_count != 0 && "cannot find suitable EGL configs");
+    EGLint want_gbm_format = _sapp.desc.alpha ? GBM_FORMAT_ARGB8888 : GBM_FORMAT_XRGB8888;
+    EGLint want_renderable_type = _sapp.desc.gl_force_gles2 ? EGL_OPENGL_ES2_BIT : EGL_OPENGL_ES3_BIT;
+    EGLint want_depth_size = 24;
+    EGLint want_stencil_size = 0;
+    EGLint want_sample_buffers = _sapp.desc.sample_count > 1 ? 1 : 0;
+    EGLint want_samples = want_sample_buffers * 4; // FIX ME
 
     EGLConfig config = NULL;
-    for (EGLint i = 0; i < config_count; i++) {
-        EGLint format;
-        if (eglGetConfigAttrib(_sapp.rpi.display, configs[i], EGL_NATIVE_VISUAL_ID, &format) && format == GBM_FORMAT_XRGB8888) {
+
+    {
+        EGLint num_configs;
+        eglGetConfigs(_sapp.rpi.display, NULL, 0, &num_configs);
+        printf("EGL configs: %d\n", num_configs);
+
+        EGLConfig* configs = (EGLConfig*) SOKOL_CALLOC(num_configs, sizeof(EGLConfig));
+        eglGetConfigs(_sapp.rpi.display, configs, num_configs, &num_configs);
+
+        for (EGLint i = 0; i < num_configs; i++) {
+            EGLint gbm_format;
+            if (!eglGetConfigAttrib(_sapp.rpi.display, configs[i], EGL_NATIVE_VISUAL_ID, &gbm_format) || (gbm_format != want_gbm_format)) {
+                continue;
+            }
+            EGLint depth_size;
+            if (!eglGetConfigAttrib(_sapp.rpi.display, configs[i], EGL_DEPTH_SIZE, &depth_size) || (depth_size != want_depth_size)) {
+                continue;
+            }
+            EGLint stencil_size;
+            if (!eglGetConfigAttrib(_sapp.rpi.display, configs[i], EGL_STENCIL_SIZE, &stencil_size) || (stencil_size != want_stencil_size)) {
+                continue;
+            }
+            EGLint sample_buffers;
+            if (!eglGetConfigAttrib(_sapp.rpi.display, configs[i], EGL_SAMPLE_BUFFERS, &sample_buffers) || (sample_buffers != want_sample_buffers)) {
+                continue;
+            }
+            EGLint samples;
+            if (!eglGetConfigAttrib(_sapp.rpi.display, configs[i], EGL_SAMPLES, &samples)) {
+                continue;
+            }
+            gbm_format_name_desc format_desc;
+            printf("  %2d - %s, depth %2d, stencil %2d, sample buffers %d, samples %d\n", i,
+                gbm_format_get_name(gbm_format, &format_desc), depth_size, stencil_size, sample_buffers, samples);
+
+            EGLint renderable_type;
+            if (!eglGetConfigAttrib(_sapp.rpi.display, configs[i], EGL_RENDERABLE_TYPE, &renderable_type)) {
+                continue;
+            }
+            if ((renderable_type & want_renderable_type) != want_renderable_type) {
+                continue;
+            }
+
+            config = configs[i];
+            break;
+        }
+
+        SOKOL_FREE(configs);
+    }
+
+    if (config == NULL) {
+        EGLint alpha_size = _sapp.desc.alpha ? 8 : 0;
+        const EGLint attribs[] = {
+            EGL_RENDERABLE_TYPE, want_renderable_type,
+            EGL_RED_SIZE, 8,
+            EGL_GREEN_SIZE, 8,
+            EGL_BLUE_SIZE, 8,
+            EGL_ALPHA_SIZE, alpha_size,
+            EGL_DEPTH_SIZE, want_depth_size,
+            EGL_STENCIL_SIZE, want_stencil_size,
+            EGL_SAMPLE_BUFFERS, want_sample_buffers,
+            EGL_SAMPLES, want_samples,
+            EGL_NONE,
+        };
+
+        EGLConfig configs[32];
+        EGLint config_count;
+        ok = eglChooseConfig(_sapp.rpi.display, attribs, configs, 32, &config_count);
+        SOKOL_ASSERT(ok && config_count != 0 && "cannot find suitable EGL configs");
+
+        for (EGLint i = 0; i < config_count; i++) {
+            EGLint format;
+            if (!eglGetConfigAttrib(_sapp.rpi.display, configs[i], EGL_NATIVE_VISUAL_ID, &format) || (format != want_gbm_format)) {
+                continue;
+            }
             config = configs[i];
             break;
         }
     }
     SOKOL_ASSERT(config && "cannot find EGL config that matches GBM surface format");
 
+    PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC eglCreatePlatformWindowSurfaceEXT = (PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC) eglGetProcAddress("eglCreatePlatformWindowSurfaceEXT");
     _sapp.rpi.surface = eglCreatePlatformWindowSurfaceEXT(_sapp.rpi.display, config, _sapp.rpi.drm.surface, NULL);
     SOKOL_ASSERT(_sapp.rpi.surface != EGL_NO_SURFACE && "cannot create EGL surface");
 
-    const EGLint context_attrib[] = {
-        #if defined(SOKOL_GLES3)
-            EGL_CONTEXT_CLIENT_VERSION, _sapp.desc.gl_force_gles2 ? 2 : 3,
-        #else
-            EGL_CONTEXT_CLIENT_VERSION, 2,
-        #endif
+    EGLint client_version = _sapp.desc.gl_force_gles2 ? 2 : 3;
 
+    const EGLint context_attrib[] = {
+        EGL_CONTEXT_CLIENT_VERSION, client_version,
         // use EGL_KHR_create_context if you want to debug context together with GL_KHR_debug
         // EGL_CONTEXT_FLAGS_KHR, EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR,
-
         // use EGL_KHR_create_context_no_error for "production" builds, may improve performance
         // EGL_CONTEXT_OPENGL_NO_ERROR_KHR, EGL_TRUE,
-
         EGL_NONE,
     };
     _sapp.rpi.context = eglCreateContext(_sapp.rpi.display, config, EGL_NO_CONTEXT, context_attrib);
@@ -8811,6 +8873,9 @@ _SOKOL_PRIVATE void _sapp_rpi_init_egl(void) {
 
     ok = eglMakeCurrent(_sapp.rpi.display, _sapp.rpi.surface, _sapp.rpi.surface, _sapp.rpi.context);
     SOKOL_ASSERT(ok && "cannot set EGL context");
+
+    ok = eglSwapInterval(_sapp.rpi.display, 0);
+    SOKOL_ASSERT(ok && "cannot set EGL swap interval");
 }
 
 _SOKOL_PRIVATE void _sapp_rpi_cleanup_egl(void) {
@@ -8832,26 +8897,51 @@ _SOKOL_PRIVATE void _sapp_rpi_destroy_bo(gbm_bo* bo, void* user) {
     drmModeRmFB(dri, fb);
 }
 
-_SOKOL_PRIVATE uint32_t _sapp_rpi_get_fb_from_bo(_sapp_rpi_drm_t* drm, gbm_bo* bo) {
-    uint32_t fb = (uint32_t)(uintptr_t) gbm_bo_get_user_data(bo);
-    if (fb) {
-        return fb;
+_SOKOL_PRIVATE uint32_t _sapp_rpi_swap_and_lock_buffer(gbm_bo** bo) {
+    _sapp_rpi_t* state = &_sapp.rpi;
+
+    EGLBoolean success = eglSwapBuffers(state->display, state->surface);
+    SOKOL_ASSERT(success && "error swapping EGL buffers");
+
+    gbm_bo* next_bo = gbm_surface_lock_front_buffer(state->drm.surface);
+    SOKOL_ASSERT(next_bo && "error locking GBM surface");
+
+    uint32_t buf_id = (uint32_t)(uintptr_t) gbm_bo_get_user_data(next_bo);
+
+    if (!buf_id) {
+        uint32_t width = gbm_bo_get_width(next_bo);
+        uint32_t height = gbm_bo_get_height(next_bo);
+        uint32_t stride = gbm_bo_get_stride(next_bo);
+        uint32_t fd = gbm_bo_get_handle(next_bo).u32;
+        uint8_t bpp = (stride / width * 8) & 0xff;
+
+        int err = drmModeAddFB(state->drm.fd, width, height, 24, bpp, stride, fd, &buf_id);
+        SOKOL_ASSERT(!err && "error adding DRM framebuffer");
+
+        gbm_bo_set_user_data(next_bo, (void*)(uintptr_t) buf_id, _sapp_rpi_destroy_bo);
+
+        // TODO: samples I found only do this once, for the first buffer created
+        err = drmModeSetCrtc(state->drm.fd, state->drm.crtc->crtc_id, buf_id, 0, 0, &state->drm.connector_id, 1, &state->drm.crtc->mode);
+        SOKOL_ASSERT(!err && "error setting CRTC for DRM framebuffer");
     }
 
-    uint32_t width = gbm_bo_get_width(bo);
-    uint32_t height = gbm_bo_get_height(bo);
-    uint32_t stride = gbm_bo_get_stride(bo);
-    uint32_t fd = gbm_bo_get_handle(bo).u32;
+    *bo = next_bo;
 
-    int ok = drmModeAddFB(drm->fd, width, height, 24, 32, stride, fd, &fb);
-    SOKOL_ASSERT(ok == 0 && "cannot add DRM framebuffer");
-
-    gbm_bo_set_user_data(bo, (void*)(uintptr_t) fb, _sapp_rpi_destroy_bo);
-    return fb;
+    SOKOL_ASSERT(buf_id);
+    return buf_id;
 }
 
-_SOKOL_PRIVATE void _sapp_rpi_page_flipped_handler(int fd, unsigned int sequence, unsigned int sec, unsigned int usec, void* user)
-{
+_SOKOL_PRIVATE void _sapp_rpi_release_buffer(gbm_bo** bo, gbm_bo* next_bo) {
+    _sapp_rpi_t* state = &_sapp.rpi;
+
+    if (*bo) {
+        gbm_surface_release_buffer(state->drm.surface, *bo);
+    }
+
+    *bo = next_bo;
+}
+
+_SOKOL_PRIVATE void _sapp_rpi_page_flip_handler(int fd, unsigned int sequence, unsigned int sec, unsigned int usec, void* user) {
     _SOKOL_UNUSED(fd);
     _SOKOL_UNUSED(sequence);
     _SOKOL_UNUSED(sec);
@@ -8860,75 +8950,49 @@ _SOKOL_PRIVATE void _sapp_rpi_page_flipped_handler(int fd, unsigned int sequence
     *waiting_for_flip = 0;
 }
 
-_SOKOL_PRIVATE int _sapp_rpi_wait_for_flip(int timeout) {
-    _sapp_rpi_drm_t* drm = &_sapp.rpi.drm;
+_SOKOL_PRIVATE void _sapp_rpi_frame() {
+    _sapp_rpi_t* state = &_sapp.rpi;
 
-    drmEventContext ctx = {
-        .version = DRM_EVENT_CONTEXT_VERSION,
-        .page_flip_handler = _sapp_rpi_page_flipped_handler,
-    };
+    _sapp_frame();
 
-    struct pollfd p = {
-        .fd = drm->fd,
+    gbm_bo* next_bo = NULL;
+    uint32_t buf_id = _sapp_rpi_swap_and_lock_buffer(&next_bo);
+
+    int waiting_for_flip = true;
+
+    int err = drmModePageFlip(state->drm.fd, state->drm.crtc->crtc_id, buf_id, DRM_MODE_PAGE_FLIP_EVENT, &waiting_for_flip);
+    SOKOL_ASSERT(!err && "error on page flip");
+
+    struct pollfd pfd = {
+        .fd = state->drm.fd,
         .events = POLLIN,
     };
 
-    while (drm->waiting_for_flip) {
-        p.revents = 0;
+    drmEventContext event_ctx = {
+        .version = 2, /*DRM_EVENT_CONTEXT_VERSION,*/
+        .page_flip_handler = _sapp_rpi_page_flip_handler,
+    };
 
-        if (poll(&p, 1, timeout) < 0) {
-            if (errno == EINTR) {
+    int timeout = -1;
+
+    while (waiting_for_flip) {
+        pfd.revents = 0;
+
+        int ret = poll(&pfd, 1, timeout);
+        if (ret < 0) {
+            if (errno == EAGAIN || errno == EINTR) {
                 continue;
             }
             SOKOL_ASSERT(!"poll error");
-            return 0;
+            break;
         }
 
-        if (p.revents & POLLIN) {
-            drmHandleEvent(drm->fd, &ctx);
-        } else {
-            // timeout reached
-            return 0;
+        if (pfd.revents & POLLIN) {
+            drmHandleEvent(state->drm.fd, &event_ctx);
         }
     }
-    return 1;
-}
 
-_SOKOL_PRIVATE void _sapp_rpi_present(void) {
-    _sapp_rpi_drm_t* drm = &_sapp.rpi.drm;
-    _sapp_rpi_t* egl = &_sapp.rpi;
-
-    int timeout = _sapp.swap_interval > 0 ? -1 : 0;
-    if (_sapp_rpi_wait_for_flip(timeout) == 0) {
-        // frame is done faster than previous has finished flipping
-        // so don't display it and continue with next frame
-        return;
-    }
-
-    if (drm->curr_bo) {
-        gbm_surface_release_buffer(drm->surface, drm->curr_bo);
-        drm->curr_bo = NULL;
-    }
-
-    drm->curr_bo = drm->next_bo;
-
-    EGLBoolean egl_ok = eglSwapBuffers(egl->display, egl->surface);
-    SOKOL_ASSERT(egl_ok && "cannot swap EGL buffers");
-
-    drm->next_bo = gbm_surface_lock_front_buffer(drm->surface);
-    SOKOL_ASSERT(drm->next_bo && "cannot lock GBM surface");
-
-    uint32_t fb = _sapp_rpi_get_fb_from_bo(drm, drm->next_bo);
-
-    if (!drm->curr_bo) {
-        int err = drmModeSetCrtc(drm->fd, drm->crtc->crtc_id, fb, 0, 0, &drm->connector_id, 1, &drm->crtc->mode);
-        SOKOL_ASSERT(err == 0 && "cannot set CRTC for DRM framebuffer");
-    } else {
-        int err = drmModePageFlip(drm->fd, drm->crtc->crtc_id, fb, DRM_MODE_PAGE_FLIP_EVENT, &drm->waiting_for_flip);
-        if (err == 0 && _sapp.swap_interval > 0) {
-            drm->waiting_for_flip = 1;
-        }
-    }
+    _sapp_rpi_release_buffer(&state->drm.front_bo, next_bo);
 }
 
 _SOKOL_PRIVATE void _sapp_rpi_run(const sapp_desc* desc) {
@@ -8952,8 +9016,7 @@ _SOKOL_PRIVATE void _sapp_rpi_run(const sapp_desc* desc) {
 
     while (!_sapp.quit_ordered) {
         _sapp_rpi_read_input_devices();
-        _sapp_frame();
-        _sapp_rpi_present();
+        _sapp_rpi_frame();
         if (_sapp.quit_requested && !_sapp.quit_ordered) {
             _sapp_rpi_app_event(SAPP_EVENTTYPE_QUIT_REQUESTED);
             if (_sapp.quit_requested) {
@@ -8962,8 +9025,6 @@ _SOKOL_PRIVATE void _sapp_rpi_run(const sapp_desc* desc) {
         }
     }
     _sapp_call_cleanup();
-
-    _sapp_rpi_wait_for_flip(-1);
 
     _sapp_rpi_cleanup_egl();
     _sapp_rpi_cleanup_drm();
