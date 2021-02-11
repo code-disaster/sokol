@@ -178,7 +178,9 @@ SOKOL_DYN_API_DECL void sdyn_load(const char* library_name);
 #define _SDYN_APP_FUNCS \
     _SDYN_XMACRO(sapp_isvalid, bool, (void), ()); \
     _SDYN_XMACRO(sapp_width, int, (void), ()); \
+    _SDYN_XMACRO(sapp_widthf, float, (void), ()); \
     _SDYN_XMACRO(sapp_height, int, (void), ()); \
+    _SDYN_XMACRO(sapp_heightf, float, (void), ()); \
     _SDYN_XMACRO(sapp_color_format, int, (void), ()); \
     _SDYN_XMACRO(sapp_depth_format, int, (void), ()); \
     _SDYN_XMACRO(sapp_sample_count, int, (void), ()); \
@@ -243,17 +245,20 @@ SOKOL_DYN_API_DECL void sdyn_load(const char* library_name);
     _SDYN_XMACRO(sg_destroy_shader, void, (sg_shader shd), (shd)); \
     _SDYN_XMACRO(sg_destroy_pipeline, void, (sg_pipeline pip), (pip)); \
     _SDYN_XMACRO(sg_destroy_pass, void, (sg_pass pass), (pass)); \
-    _SDYN_XMACRO(sg_update_buffer, void, (sg_buffer buf, const void* data_ptr, int data_size), (buf, data_ptr, data_size)); \
-    _SDYN_XMACRO(sg_update_image, void, (sg_image img, const sg_image_content* data), (img, data)); \
-    _SDYN_XMACRO(sg_append_buffer, int, (sg_buffer buf, const void* data_ptr, int data_size), (buf, data_ptr, data_size)); \
+    _SDYN_XMACRO(sg_update_buffer, void, (sg_buffer buf, const sg_range* data), (buf, data)); \
+    _SDYN_XMACRO(sg_update_image, void, (sg_image img, const sg_range* data), (img, data)); \
+    _SDYN_XMACRO(sg_append_buffer, int, (sg_buffer buf, const sg_range* data), (buf, data)); \
     _SDYN_XMACRO(sg_query_buffer_overflow, bool, (sg_buffer buf), (buf)); \
     _SDYN_XMACRO(sg_begin_default_pass, void, (const sg_pass_action* pass_action, int width, int height), (pass_action, width, height)); \
+    _SDYN_XMACRO(sg_begin_default_passf, void, (const sg_pass_action* pass_action, float width, float height), (pass_action, width, height)); \
     _SDYN_XMACRO(sg_begin_pass, void, (sg_pass pass, const sg_pass_action* pass_action), (pass, pass_action)); \
     _SDYN_XMACRO(sg_apply_viewport, void, (int x, int y, int width, int height, bool origin_top_left), (x, y, width, height, origin_top_left)); \
+    _SDYN_XMACRO(sg_apply_viewportf, void, (float x, float y, float width, float height, bool origin_top_left), (x, y, width, height, origin_top_left)); \
     _SDYN_XMACRO(sg_apply_scissor_rect, void, (int x, int y, int width, int height, bool origin_top_left), (x, y, width, height, origin_top_left)); \
+    _SDYN_XMACRO(sg_apply_scissor_rectf, void, (float x, float y, float width, float height, bool origin_top_left), (x, y, width, height, origin_top_left)); \
     _SDYN_XMACRO(sg_apply_pipeline, void, (sg_pipeline pip), (pip)); \
     _SDYN_XMACRO(sg_apply_bindings, void, (const sg_bindings* bindings), (bindings)); \
-    _SDYN_XMACRO(sg_apply_uniforms, void, (sg_shader_stage stage, int ub_index, const void* data, int num_bytes), (stage, ub_index, data, num_bytes)); \
+    _SDYN_XMACRO(sg_apply_uniforms, void, (sg_shader_stage stage, int ub_index, const sg_range* data), (stage, ub_index, data)); \
     _SDYN_XMACRO(sg_draw, void, (int base_element, int num_elements, int num_instances), (base_element, num_elements, num_instances)); \
     _SDYN_XMACRO(sg_end_pass, void, (void), ()); \
     _SDYN_XMACRO(sg_commit, void, (void), ()); \
