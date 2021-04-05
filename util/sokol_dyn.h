@@ -252,7 +252,7 @@ SOKOL_DYN_API_DECL void sdyn_load(const char* library_name);
     _SDYN_XMACRO(sg_destroy_pipeline, void, (sg_pipeline pip), (pip)); \
     _SDYN_XMACRO(sg_destroy_pass, void, (sg_pass pass), (pass)); \
     _SDYN_XMACRO(sg_update_buffer, void, (sg_buffer buf, const sg_range* data), (buf, data)); \
-    _SDYN_XMACRO(sg_update_image, void, (sg_image img, const sg_range* data), (img, data)); \
+    _SDYN_XMACRO(sg_update_image, void, (sg_image img, const sg_image_data* data), (img, data)); \
     _SDYN_XMACRO(sg_append_buffer, int, (sg_buffer buf, const sg_range* data), (buf, data)); \
     _SDYN_XMACRO(sg_query_buffer_overflow, bool, (sg_buffer buf), (buf)); \
     _SDYN_XMACRO(sg_begin_default_pass, void, (const sg_pass_action* pass_action, int width, int height), (pass_action, width, height)); \
