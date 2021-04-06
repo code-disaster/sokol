@@ -131,6 +131,8 @@ SOKOL_DYN_API_DECL void sdyn_load(const char* library_name);
 
 #if defined(_WIN32)
     #define _SDYN_WIN32 (1)
+#elif defined(__linux__) || defined(__unix__)
+    #define _SDYN_LINUX (1)
 #else
 #error "sokol_dyn.h: Unknown platform"
 #endif
@@ -171,6 +173,10 @@ SOKOL_DYN_API_DECL void sdyn_load(const char* library_name);
     #endif
     #include <windows.h>
     #include <shellapi.h>
+    #define _SDYN_APIENTRY __stdcall
+#elif defined(_SDYN_LINUX)
+    #include <dlfcn.h>
+    #define _SDYN_APIENTRY
 #endif
 
 /*== COMMON DECLARATIONS =====================================================*/
@@ -322,7 +328,7 @@ SOKOL_DYN_API_DECL void sdyn_load(const char* library_name);
 #endif
 
 #define _SDYN_XMACRO(name, ret, params, args) \
-    typedef ret (__stdcall * PFN_ ## name) params; \
+    typedef ret (_SDYN_APIENTRY * PFN_ ## name) params; \
     static PFN_ ## name pfn_ ## name; \
     extern ret name params { return pfn_ ## name args; }
 
@@ -364,5 +370,27 @@ SOKOL_API_IMPL void sdyn_load(const char* library_name) {
 }
 
 #endif // _SDYN_WIN32
+
+/*== LINUX ===================================================================*/
+#if defined(_SDYN_LINUX)
+
+SOKOL_API_IMPL void sdyn_load(const char* library_name) {
+    void* libso = dlopen(library_name, RTLD_LAZY | RTLD_GLOBAL);
+    if (!libso) {
+        _sdyn_fail("Failed to load library\n");
+    }
+
+#define _SDYN_XMACRO(name, ret, params, args) \
+    pfn_ ## name = (PFN_ ## name) dlsym(libso, #name); \
+    SOKOL_ASSERT(pfn_ ## name != NULL);
+
+    _SDYN_APP_FUNCS
+    _SDYN_GFX_FUNCS
+    _SDYN_GLUE_FUNCS
+
+#undef _SDYN_XMACRO
+}
+
+#endif // _SDYN_LINUX
 
 #endif // SOKOL_DYN_IMPL
