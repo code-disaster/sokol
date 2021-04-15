@@ -210,6 +210,7 @@ SOKOL_DYN_API_DECL void sdyn_load(const char* library_name);
     _SDYN_XMACRO(sapp_set_clipboard_string, void, (const char* str), (str)); \
     _SDYN_XMACRO(sapp_get_clipboard_string, const char*, (void), ()); \
     _SDYN_XMACRO(sapp_set_window_title, void, (const char* str), (str)); \
+    _SDYN_XMACRO(sapp_set_icon, void, (const sapp_icon_desc* icon_desc), (icon_desc)); \
     _SDYN_XMACRO(sapp_get_num_dropped_files, int, (void), ()); \
     _SDYN_XMACRO(sapp_get_dropped_file_path, const char*, (int index), (index)); \
     _SDYN_XMACRO(sapp_run, void, (const sapp_desc* desc), (desc)); \
