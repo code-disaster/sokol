@@ -49,10 +49,14 @@
         wrappers which call their respective DLL counterparts through function
         pointers obtained at load time.
 
-    --- As a last step, call sdyn_load() with the path/name of your shared
-        library, before calling any sokol_app or sokol_gfx functions.
+    --- Call sdyn_load() with the path/name of your shared library, before
+        calling any affected sokol functions.
 
+        #if defined(SOKOL_WIN32)
             sdyn_load("sokol-dll");
+        #elif defined(SOKOL_LINUX)
+            sdyn_load("./libsokol-dll.so");
+        #endif
 
             sapp_desc desc = {
                 // ...
@@ -60,6 +64,14 @@
 
             sapp_run(&desc);
 
+        Note: sokol_dyn forwards the path directly to the platform-specific
+        library loader (Windows: LoadLibrary, Linux: dlopen).
+        It's the application's responsibility to pass the correct file name,
+        and/or set up a valid library search path.
+
+    --- Optionally, you can call sdyn_unload() to close the library again.
+
+            sdyn_unload();
 
     LICENSE
     =======
@@ -118,7 +130,16 @@
 extern "C" {
 #endif
 
-SOKOL_DYN_API_DECL void sdyn_load(const char* library_name);
+typedef enum sdyn_load_state {
+    SDYN_LOADSTATE_OK,
+    SDYN_LOADSTATE_FAILED_TO_OPEN_LIBRARY,
+    SDYN_LOADSTATE_PROC_NOT_FOUND,
+    _SDYN_LOADSTATE_FORCE_U32 = 0x7FFFFFFF
+} sdyn_load_state;
+
+SOKOL_DYN_API_DECL sdyn_load_state sdyn_load(const char* library_name);
+
+SOKOL_DYN_API_DECL void sdyn_unload(void);
 
 #ifdef __cplusplus
 } // extern "C"
@@ -339,29 +360,54 @@ _SDYN_GLUE_FUNCS
 
 #undef _SDYN_XMACRO
 
+typedef struct {
+#if defined(_SDYN_WIN32)
+    HMODULE dll;
+#elif defined(_SDYN_LINUX)
+    void* dl;
+#endif
+} _sdyn_t;
+static _sdyn_t _sdyn = {};
+
 #ifdef _MSC_VER
     #pragma warning(pop)
 #endif
 
-/*=== PRIVATE HELPER FUNCTIONS ===============================================*/
-
-static void _sdyn_fail(const char* msg) {
-    SOKOL_ASSERT(msg);
-    SOKOL_ABORT();
-}
-
 /*== WINDOWS DESKTOP =========================================================*/
 #if defined(_SDYN_WIN32)
 
-SOKOL_API_IMPL void sdyn_load(const char* library_name) {
-    HMODULE dll = LoadLibraryA(library_name);
-    if (!dll) {
-        _sdyn_fail("Failed to load library\n");
+SOKOL_API_IMPL sdyn_load_state sdyn_load(const char* library_name) {
+    SOKOL_ASSERT(!_sdyn.dll);
+
+    _sdyn.dll = LoadLibraryA(library_name);
+    if (!_sdyn.dll) {
+        return SDYN_LOADSTATE_FAILED_TO_OPEN_LIBRARY;
     }
 
 #define _SDYN_XMACRO(name, ret, params, args) \
-    pfn_ ## name = (PFN_ ## name) (void*) GetProcAddress(dll, #name); \
+    pfn_ ## name = (PFN_ ## name) (void*) GetProcAddress(_sdyn.dll, #name); \
+    if (pfn_ ## name == NULL) state = SDYN_LOADSTATE_PROC_NOT_FOUND; \
     SOKOL_ASSERT(pfn_ ## name != NULL);
+
+    sdyn_load_state state = SDYN_LOADSTATE_OK;
+
+    _SDYN_APP_FUNCS
+    _SDYN_GFX_FUNCS
+    _SDYN_GLUE_FUNCS
+
+#undef _SDYN_XMACRO
+
+    return state;
+}
+
+SOKOL_API_IMPL void sdyn_unload(void) {
+    SOKOL_ASSERT(_sdyn.dll);
+
+    FreeLibrary(_sdyn.dll);
+    _sdyn.dll = NULL;
+
+#define _SDYN_XMACRO(name, ret, params, args) \
+    pfn_ ## name = NULL;
 
     _SDYN_APP_FUNCS
     _SDYN_GFX_FUNCS
@@ -375,15 +421,38 @@ SOKOL_API_IMPL void sdyn_load(const char* library_name) {
 /*== LINUX ===================================================================*/
 #if defined(_SDYN_LINUX)
 
-SOKOL_API_IMPL void sdyn_load(const char* library_name) {
-    void* libso = dlopen(library_name, RTLD_LAZY | RTLD_GLOBAL);
-    if (!libso) {
-        _sdyn_fail("Failed to load library\n");
+SOKOL_API_IMPL sdyn_load_state sdyn_load(const char* library_name) {
+    SOKOL_ASSERT(!_sdyn.dl);
+
+    _sdyn.dl = dlopen(library_name, RTLD_LAZY | RTLD_GLOBAL);
+    if (!_sdyn.dl) {
+        return SDYN_LOADSTATE_FAILED_TO_OPEN_LIBRARY;
     }
 
 #define _SDYN_XMACRO(name, ret, params, args) \
-    pfn_ ## name = (PFN_ ## name) dlsym(libso, #name); \
+    pfn_ ## name = (PFN_ ## name) dlsym(_sdyn.dl, #name); \
+    if (pfn_ ## name == NULL) state = SDYN_LOADSTATE_PROC_NOT_FOUND; \
     SOKOL_ASSERT(pfn_ ## name != NULL);
+
+    sdyn_load_state state = SDYN_LOADSTATE_OK;
+
+    _SDYN_APP_FUNCS
+    _SDYN_GFX_FUNCS
+    _SDYN_GLUE_FUNCS
+
+#undef _SDYN_XMACRO
+
+    return state;
+}
+
+SOKOL_API_IMPL void sdyn_unload(void) {
+    SOKOL_ASSERT(_sdyn.dl);
+
+    dlclose(_sdyn.dl);
+    _sdyn.dl = NULL;
+
+#define _SDYN_XMACRO(name, ret, params, args) \
+    pfn_ ## name = NULL;
 
     _SDYN_APP_FUNCS
     _SDYN_GFX_FUNCS
