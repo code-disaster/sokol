@@ -130,14 +130,13 @@
 extern "C" {
 #endif
 
-typedef enum sdyn_load_state {
-    SDYN_LOADSTATE_OK,
-    SDYN_LOADSTATE_FAILED_TO_OPEN_LIBRARY,
-    SDYN_LOADSTATE_PROC_NOT_FOUND,
-    _SDYN_LOADSTATE_FORCE_U32 = 0x7FFFFFFF
-} sdyn_load_state;
+typedef enum sdyn_result {
+    SDYN_OK,
+    SDYN_LIBRARY_NOT_FOUND, /* failed to locate or open shared library */
+    SDYN_SYMBOL_NOT_FOUND, /* failed to look up (at least one) function pointer(s) */
+} sdyn_result;
 
-SOKOL_DYN_API_DECL sdyn_load_state sdyn_load(const char* library_name);
+SOKOL_DYN_API_DECL sdyn_result sdyn_load(const char* library_name);
 
 SOKOL_DYN_API_DECL void sdyn_unload(void);
 
@@ -376,20 +375,20 @@ static _sdyn_t _sdyn = {};
 /*== WINDOWS DESKTOP =========================================================*/
 #if defined(_SDYN_WIN32)
 
-SOKOL_API_IMPL sdyn_load_state sdyn_load(const char* library_name) {
+SOKOL_API_IMPL sdyn_result sdyn_load(const char* library_name) {
     SOKOL_ASSERT(!_sdyn.dll);
 
     _sdyn.dll = LoadLibraryA(library_name);
     if (!_sdyn.dll) {
-        return SDYN_LOADSTATE_FAILED_TO_OPEN_LIBRARY;
+        return SDYN_LIBRARY_NOT_FOUND;
     }
 
 #define _SDYN_XMACRO(name, ret, params, args) \
     pfn_ ## name = (PFN_ ## name) (void*) GetProcAddress(_sdyn.dll, #name); \
-    if (pfn_ ## name == NULL) state = SDYN_LOADSTATE_PROC_NOT_FOUND; \
+    if (pfn_ ## name == NULL) state = SDYN_SYMBOL_NOT_FOUND; \
     SOKOL_ASSERT(pfn_ ## name != NULL);
 
-    sdyn_load_state state = SDYN_LOADSTATE_OK;
+    sdyn_result state = SDYN_OK;
 
     _SDYN_APP_FUNCS
     _SDYN_GFX_FUNCS
@@ -421,20 +420,20 @@ SOKOL_API_IMPL void sdyn_unload(void) {
 /*== LINUX ===================================================================*/
 #if defined(_SDYN_LINUX)
 
-SOKOL_API_IMPL sdyn_load_state sdyn_load(const char* library_name) {
+SOKOL_API_IMPL sdyn_result sdyn_load(const char* library_name) {
     SOKOL_ASSERT(!_sdyn.dl);
 
     _sdyn.dl = dlopen(library_name, RTLD_LAZY | RTLD_GLOBAL);
     if (!_sdyn.dl) {
-        return SDYN_LOADSTATE_FAILED_TO_OPEN_LIBRARY;
+        return SDYN_LIBRARY_NOT_FOUND;
     }
 
 #define _SDYN_XMACRO(name, ret, params, args) \
     pfn_ ## name = (PFN_ ## name) dlsym(_sdyn.dl, #name); \
-    if (pfn_ ## name == NULL) state = SDYN_LOADSTATE_PROC_NOT_FOUND; \
+    if (pfn_ ## name == NULL) state = SDYN_SYMBOL_NOT_FOUND; \
     SOKOL_ASSERT(pfn_ ## name != NULL);
 
-    sdyn_load_state state = SDYN_LOADSTATE_OK;
+    sdyn_result state = SDYN_OK;
 
     _SDYN_APP_FUNCS
     _SDYN_GFX_FUNCS
