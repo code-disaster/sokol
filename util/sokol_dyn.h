@@ -245,6 +245,7 @@ SOKOL_DYN_API_DECL void sdyn_unload(void);
     _SDYN_XMACRO(sapp_ios_get_window, const void*, (void), ()); \
     _SDYN_XMACRO(sapp_d3d11_get_device, const void*, (void), ()); \
     _SDYN_XMACRO(sapp_d3d11_get_device_context, const void*, (void), ()); \
+    _SDYN_XMACRO(sapp_d3d11_get_swap_chain, const void*, (void), ()); \
     _SDYN_XMACRO(sapp_d3d11_get_render_target_view, const void*, (void), ()); \
     _SDYN_XMACRO(sapp_d3d11_get_depth_stencil_view, const void*, (void), ()); \
     _SDYN_XMACRO(sapp_win32_get_hwnd, const void*, (void), ()); \
