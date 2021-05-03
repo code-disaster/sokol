@@ -252,6 +252,8 @@
 
                 23 == SG_PIXELFORMAT_RGBA8
                 27 == SG_PIXELFORMAT_BGRA8
+                28 == SG_PIXELFORMAT_RGB10A2
+                37 == SG_PIXELFORMAT_RGBA16F
                 41 == SG_PIXELFORMAT_DEPTH
                 42 == SG_PIXELFORMAT_DEPTH_STENCIL
 
@@ -1346,6 +1348,8 @@ typedef struct sapp_desc {
     bool high_dpi;                      // whether the rendering canvas is full-resolution on HighDPI displays
     bool fullscreen;                    // whether the window should be created in fullscreen mode
     bool alpha;                         // whether the framebuffer should have an alpha channel (ignored on some platforms)
+    int bits_per_color;                 // the preferred framebuffer color depth (default: 8)
+    int refresh_rate;                   // the preferred refresh rate in fullscreen mode (default: 60)
     const char* window_title;           // the window title as UTF-8 encoded string
     bool user_cursor;                   // if true, user is expected to manage cursor image in SAPP_EVENTTYPE_UPDATE_CURSOR
     bool enable_clipboard;              // enable clipboard access, default is false
@@ -2211,6 +2215,8 @@ typedef struct {
 /* NOTE: the pixel format values *must* be compatible with sg_pixel_format */
 #define _SAPP_PIXELFORMAT_RGBA8 (23)
 #define _SAPP_PIXELFORMAT_BGRA8 (27)
+#define _SAPP_PIXELFORMAT_RGB10A2 (28)
+#define _SAPP_PIXELFORMAT_RGBA16F (37)
 #define _SAPP_PIXELFORMAT_DEPTH (41)
 #define _SAPP_PIXELFORMAT_DEPTH_STENCIL (42)
 
@@ -2415,6 +2421,8 @@ _SOKOL_PRIVATE sapp_desc _sapp_desc_defaults(const sapp_desc* in_desc) {
     desc.height = _sapp_def(desc.height, 480);
     desc.sample_count = _sapp_def(desc.sample_count, 1);
     desc.swap_interval = _sapp_def(desc.swap_interval, 1);
+    desc.bits_per_color = _sapp_def(desc.bits_per_color, 8);
+    desc.refresh_rate = _sapp_def(desc.refresh_rate, 60);
     desc.html5_canvas_name = _sapp_def(desc.html5_canvas_name, "canvas");
     desc.clipboard_size = _sapp_def(desc.clipboard_size, 8192);
     desc.max_dropped_files = _sapp_def(desc.max_dropped_files, 1);
@@ -5395,8 +5403,14 @@ _SOKOL_PRIVATE void _sapp_d3d11_create_device_and_swapchain(void) {
     DXGI_SWAP_CHAIN_DESC* sc_desc = &_sapp.d3d11.swap_chain_desc;
     sc_desc->BufferDesc.Width = (UINT)_sapp.framebuffer_width;
     sc_desc->BufferDesc.Height = (UINT)_sapp.framebuffer_height;
-    sc_desc->BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    sc_desc->BufferDesc.RefreshRate.Numerator = 60;
+    if (_sapp.desc.bits_per_color == 16) {
+        sc_desc->BufferDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    } else if (_sapp.desc.bits_per_color == 10) {
+        sc_desc->BufferDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+    } else {
+        sc_desc->BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    }
+    sc_desc->BufferDesc.RefreshRate.Numerator = _sapp.desc.refresh_rate;
     sc_desc->BufferDesc.RefreshRate.Denominator = 1;
     sc_desc->OutputWindow = _sapp.win32.hwnd;
     sc_desc->Windowed = true;
@@ -5473,7 +5487,7 @@ _SOKOL_PRIVATE void _sapp_d3d11_create_default_render_target(void) {
 
     /* create MSAA texture and view if antialiasing requested */
     if (_sapp.sample_count > 1) {
-        tex_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        tex_desc.Format = _sapp.d3d11.swap_chain_desc.BufferDesc.Format;
         hr = _sapp_d3d11_CreateTexture2D(_sapp.d3d11.device, &tex_desc, NULL, &_sapp.d3d11.msaa_rt);
         SOKOL_ASSERT(SUCCEEDED(hr) && _sapp.d3d11.msaa_rt);
         hr = _sapp_d3d11_CreateRenderTargetView(_sapp.d3d11.device, (ID3D11Resource*)_sapp.d3d11.msaa_rt, NULL, &_sapp.d3d11.msaa_rtv);
@@ -5501,7 +5515,7 @@ _SOKOL_PRIVATE void _sapp_d3d11_destroy_default_render_target(void) {
 _SOKOL_PRIVATE void _sapp_d3d11_resize_default_render_target(void) {
     if (_sapp.d3d11.swap_chain) {
         _sapp_d3d11_destroy_default_render_target();
-        _sapp_dxgi_ResizeBuffers(_sapp.d3d11.swap_chain, _sapp.d3d11.swap_chain_desc.BufferCount, (UINT)_sapp.framebuffer_width, (UINT)_sapp.framebuffer_height, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+        _sapp_dxgi_ResizeBuffers(_sapp.d3d11.swap_chain, _sapp.d3d11.swap_chain_desc.BufferCount, (UINT)_sapp.framebuffer_width, (UINT)_sapp.framebuffer_height, _sapp.d3d11.swap_chain_desc.BufferDesc.Format, 0);
         _sapp_d3d11_create_default_render_target();
     }
 }
@@ -5511,7 +5525,7 @@ _SOKOL_PRIVATE void _sapp_d3d11_present(void) {
     if (_sapp.sample_count > 1) {
         SOKOL_ASSERT(_sapp.d3d11.rt);
         SOKOL_ASSERT(_sapp.d3d11.msaa_rt);
-        _sapp_d3d11_ResolveSubresource(_sapp.d3d11.device_context, (ID3D11Resource*)_sapp.d3d11.rt, 0, (ID3D11Resource*)_sapp.d3d11.msaa_rt, 0, DXGI_FORMAT_B8G8R8A8_UNORM);
+        _sapp_d3d11_ResolveSubresource(_sapp.d3d11.device_context, (ID3D11Resource*)_sapp.d3d11.rt, 0, (ID3D11Resource*)_sapp.d3d11.msaa_rt, 0, _sapp.d3d11.swap_chain_desc.BufferDesc.Format);
     }
     _sapp_dxgi_Present(_sapp.d3d11.swap_chain, (UINT)_sapp.swap_interval, 0);
 }
@@ -10614,8 +10628,20 @@ SOKOL_API_IMPL int sapp_color_format(void) {
                 SOKOL_UNREACHABLE;
                 return 0;
         }
-    #elif defined(SOKOL_METAL) || defined(SOKOL_D3D11)
+    #elif defined(SOKOL_METAL)
         return _SAPP_PIXELFORMAT_BGRA8;
+    #elif defined(SOKOL_D3D11)
+        switch (_sapp.d3d11.swap_chain_desc.BufferDesc.Format) {
+            case DXGI_FORMAT_B8G8R8A8_UNORM:
+                return _SAPP_PIXELFORMAT_BGRA8;
+            case DXGI_FORMAT_R10G10B10A2_UNORM:
+                return _SAPP_PIXELFORMAT_RGB10A2;
+            case DXGI_FORMAT_R16G16B16A16_FLOAT:
+                return _SAPP_PIXELFORMAT_RGBA16F;
+            default:
+                SOKOL_UNREACHABLE;
+                return 0;
+        }
     #else
         return _SAPP_PIXELFORMAT_RGBA8;
     #endif
