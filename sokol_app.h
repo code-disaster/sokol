@@ -8402,7 +8402,7 @@ void ANativeActivity_onCreate(ANativeActivity* activity, void* saved_state, size
 
 #if defined(_SAPP_RPI)
 
-_SOKOL_PRIVATE bool _sapp_rpi_init_input_devices(void) {
+_SOKOL_PRIVATE void _sapp_rpi_init_input_devices(void) {
     _sapp.rpi.fd_mouse = -1;
 
     const char* inputs_dir = "/dev/input/by-id";
@@ -8437,15 +8437,12 @@ _SOKOL_PRIVATE bool _sapp_rpi_init_input_devices(void) {
         if (num_kb == 0 && _sapp.rpi.fd_mouse == -1) {
             SOKOL_LOG("no input devices found");
         }
-
-        while (num_kb <= max_kb) {
-            _sapp.rpi.fd_kb[num_kb++] = -1;
-        }
-
-        return true;
     } else {
         SOKOL_LOG("failed to open directory: /dev/input/by-id");
-        return false;
+    }
+
+    while (num_kb <= max_kb) {
+        _sapp.rpi.fd_kb[num_kb++] = -1;
     }
 }
 
