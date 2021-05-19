@@ -1772,15 +1772,6 @@ inline void sapp_run(const sapp_desc& desc) { return sapp_run(&desc); }
     #include <android/native_activity.h>
     #include <android/looper.h>
     #include <EGL/egl.h>
-    #if defined(SOKOL_GLES3)
-        #include <GLES3/gl3.h>
-    #else
-        #ifndef GL_EXT_PROTOTYPES
-            #define GL_GLEXT_PROTOTYPES
-        #endif
-        #include <GLES2/gl2.h>
-        #include <GLES2/gl2ext.h>
-    #endif
 #elif defined(_SAPP_RPI)
     #include <gbm.h>
     #include <xf86drm.h>
@@ -1794,7 +1785,6 @@ inline void sapp_run(const sapp_desc& desc) { return sapp_run(&desc); }
     #include <signal.h>
     #include <EGL/egl.h>
     #include <EGL/eglext.h>
-    #include <GLES3/gl3.h>
 #elif defined(_SAPP_LINUX)
     #define GL_GLEXT_PROTOTYPES
     #include <X11/Xlib.h>
